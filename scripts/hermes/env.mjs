@@ -50,11 +50,14 @@ for (const line of lines) {
   out.push(`${name}=${wanted.get(name)}`);
 }
 
+// A trailing blank line in the original file must not become a gap in the
+// middle of the file once the new names are appended.
+while (out.length && out[out.length - 1].trim() === "") out.pop();
+
 for (const [name, value] of wanted) {
   if (!seen.has(name)) out.push(`${name}=${value}`);
 }
 
-while (out.length && out[out.length - 1] === "") out.pop();
 await writeFile(file, `${out.join("\n")}\n`, { mode: 0o600 });
 await chmod(file, 0o600);
 

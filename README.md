@@ -80,5 +80,10 @@ gh workflow run hermes-loop.yml -f runner=a
   دو برابر نشود.
 * **قفل خروجی فقط برای uid کاربر `nine`** است؛ ترافیک تلگرام/گیت خود Hermes مستقیم
   می‌رود.
+* **کرون watchdog بعد از ۶۰ روز بی‌فعالیتیِ ریپو خودکار خاموش می‌شود.** اگر مدتی هیچ
+  commit ای نداشتید و رله خوابید، یک commit/تغییر کوچک بزنید یا watchdog را دستی
+  اجرا کنید (`gh workflow run watchdog.yml`).
+* **اگر رله مرد:** `gh workflow run watchdog.yml` یا
+  `gh workflow run hermes-loop.yml -f runner=a`.
 * استفادهٔ ۲۴/۷ از رانرهای عمومی GitHub از نظر ToS خاکستری است؛ این ریپو و ورک‌فلو
   عمومی است و هزینه‌ای روی حساب شما نمی‌گذارد، اما مسئولیتش با شماست.

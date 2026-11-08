@@ -51,14 +51,18 @@ hermes config set model.key_env NINE_ROUTER_API_KEY
 hermes config set model.context_length "$CONTEXT"
 
 # The bot must answer messages that arrived while the previous runner was
-# backing up and dispatching this one.
-hermes config set platforms.telegram.extra.drop_pending_on_cold_boot false
+# backing up and dispatching this one. Cosmetic settings are best-effort: a
+# schema change in a future release must not keep the runner from starting.
+hermes config set platforms.telegram.extra.drop_pending_on_cold_boot false \
+  || echo "::warning::could not pin drop_pending_on_cold_boot"
 
 # Free-tier tokens are the scarce resource here: the post-turn self-review and
 # the auto-title calls would each double the traffic. Memory and skills still
 # work; only the automatic forks are off.
-hermes config set auxiliary.background_review.enabled false
-hermes config set auxiliary.title_generation.enabled false
+hermes config set auxiliary.background_review.enabled false \
+  || echo "::warning::could not disable the background review"
+hermes config set auxiliary.title_generation.enabled false \
+  || echo "::warning::could not disable automatic titles"
 
 log "secrets"
 NINE_ROUTER_API_KEY="$(tr -d '\r\n' < "$KEY_FILE")" \
@@ -78,9 +82,10 @@ echo "$GATEWAY_PID" > "$HOME/hermes-gateway.pid"
 echo "gateway pid ${GATEWAY_PID}"
 
 ready=0
+dead=0
 for _ in $(seq 1 90); do
   if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
-    echo "::error::the gateway exited during startup"
+    dead=1
     break
   fi
   if grep -qiE 'telegram.*(connect|poll|start)|connected to telegram' "$HOME/hermes-gateway.log" 2>/dev/null; then
@@ -90,16 +95,20 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 
+if [ "$dead" = 1 ]; then
+  echo "::error::the gateway exited during startup"
+  tail -60 "$HOME/hermes-gateway.log" 2>/dev/null || true
+  exit 1
+fi
+
 if [ "$ready" = 1 ]; then
   echo "✓ gateway connected to Telegram"
 else
-  echo "::warning::no Telegram connection line within 180s; the log follows"
+  # The process is alive but the log line has not appeared yet (log wording
+  # changes between releases). Do not kill a working runner over a grep.
+  echo "::warning::no Telegram connection line within 180s — continuing; the log follows"
 fi
 tail -40 "$HOME/hermes-gateway.log" 2>/dev/null || true
-
-if [ "$ready" != 1 ]; then
-  exit 1
-fi
 
 log "end-to-end"
 # One real turn through 9router proves the whole path (Hermes -> 9router ->
