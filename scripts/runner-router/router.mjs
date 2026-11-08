@@ -1617,30 +1617,45 @@ async function start() {
     if (!value) throw new Error(`${name} is not set`);
   }
 
+  // SKIP_VPN=1 is an explicit, degraded mode: 9router egresses on the runner's
+  // own IP. It exists to test whether the free tier answers at all when no
+  // Firefox VPN credential is available; the normal mode is unchanged.
+  const skipVpn = (process.env.SKIP_VPN || "").trim() === "1";
+
   // ---- 1. VPN first, proven, before 9router exists ----------------------
   await startTunnel();
-  const vpn = await bringUpVpn();
-  await installBridge();
-  const egress = await bridgeEgress(vpn.ip);
-  if (!egress.ok) {
-    throw new Error(
-      "the VPN bridge does not reach the internet — refusing to install/start 9router",
-    );
+  let vpn = { ip: process.env.RUNNER_PUBLIC_IP || "unknown", country: "direct" };
+  let egressOk = false;
+  if (skipVpn) {
+    log("• VPN: skipped (SKIP_VPN=1) — 9router will egress directly");
+  } else {
+    vpn = await bringUpVpn();
+    await installBridge();
+    const egress = await bridgeEgress(vpn.ip);
+    if (!egress.ok) {
+      throw new Error(
+        "the VPN bridge does not reach the internet — refusing to install/start 9router",
+      );
+    }
+    egressOk = true;
+    log("• VPN is up and proven. 9router will only run behind it.");
   }
-  log("• VPN is up and proven. 9router will only run behind it.");
 
   // ---- 2. install 9router, but keep it stopped --------------------------
   await installRouter(); // bootstrap is called with NINE_ROUTER_SKIP_START=1
   await restoreState();
 
   // ---- 3. lock its uid to the VPN, then start it ------------------------
-  await installRedsocks();
-  const uid = await routerUid();
-  await applyEgressLock(uid, vpn.ip);
+  let uid = -1;
+  if (!skipVpn) {
+    await installRedsocks();
+    uid = await routerUid();
+    await applyEgressLock(uid, vpn.ip);
+  }
   await installFreeTier();
   await probeFreeTier();
   await probeWreqDirect();
-  await applyProxyDropIn();
+  if (!skipVpn) await applyProxyDropIn();
   await startRouter();
   await verifyPublic();
   // The decisive end-to-end check: the app's own /v1 API, the same model the
@@ -1648,31 +1663,33 @@ async function start() {
   await probeRouterModel();
 
   // ---- 4. end-to-end ----------------------------------------------------
-  try {
-    await enableOutboundProxy();
-  } catch (err) {
-    log(
-      `• Egress: could not also set the app setting (${String(err.message).split("\n")[0]}) — the kernel lock is the guarantee`,
-    );
-  }
   let routed = false;
-  try {
-    routed = await probeThroughRouter();
-  } catch (err) {
-    log(
-      `• Egress: end-to-end probe failed (${String(err.message).split("\n")[0]}) — the kernel lock is still active`,
-    );
+  if (!skipVpn) {
+    try {
+      await enableOutboundProxy();
+    } catch (err) {
+      log(
+        `• Egress: could not also set the app setting (${String(err.message).split("\n")[0]}) — the kernel lock is the guarantee`,
+      );
+    }
+    try {
+      routed = await probeThroughRouter();
+    } catch (err) {
+      log(
+        `• Egress: end-to-end probe failed (${String(err.message).split("\n")[0]}) — the kernel lock is still active`,
+      );
+    }
   }
 
   const socks = `socks5h://router:${PROXY_PASS}@127.0.0.1:${VPN_PORT}`;
   await exportEnv({
-    FXA_SOCKS5: socks,
-    FXA_HTTP_PROXY: ROUTER_PROXY,
-    FXA_COUNTRY: vpn.country || "auto",
-    FXA_EXIT_IP: vpn.ip,
-    FXA_VPN_ACTIVE: "1",
-    FXA_VPN_SCOPE: `uid:${uid}`,
-    FXA_VPN_VERIFIED: "1", // applyEgressLock threw otherwise
+    FXA_SOCKS5: skipVpn ? "" : socks,
+    FXA_HTTP_PROXY: skipVpn ? "" : ROUTER_PROXY,
+    FXA_COUNTRY: skipVpn ? "direct" : vpn.country || "auto",
+    FXA_EXIT_IP: skipVpn ? "" : vpn.ip,
+    FXA_VPN_ACTIVE: skipVpn ? "0" : "1",
+    FXA_VPN_SCOPE: skipVpn ? "none" : `uid:${uid}`,
+    FXA_VPN_VERIFIED: skipVpn ? "0" : "1", // applyEgressLock threw otherwise
     FXA_FREE_TIER: `zen-proxy :${FREE_PORT} (uid ${uid}, Bun ${BUN_VERSION})`,
     FXA_FREE_TIER_MODEL: FREE_MODEL,
   });
@@ -1680,19 +1697,26 @@ async function start() {
   header("READY");
   log(`  URL      : https://${DOMAIN}/dashboard`);
   log(`  runner   : ${process.env.RUNNER_PUBLIC_IP || "?"} (tunnel + agent stay direct)`);
-  log(
-    `  egress   : 9router (uid ${uid}) → nft redirect → redsocks :${REDSOCKS_PORT} → SOCKS5 ${VPN_PORT} → VPN exit ${vpn.ip} (${vpn.country || "auto"})`,
-  );
-  log(
-    `  lock     : uid ${uid} TCP forced through the VPN; IPv6 + non-DNS UDP dropped; loopback/private exempt`,
-  );
+  if (skipVpn) {
+    log(`  egress   : 9router direct from the runner IP (SKIP_VPN=1)`);
+    log(`  lock     : none (degraded mode)`);
+  } else {
+    log(
+      `  egress   : 9router (uid ${uid}) → nft redirect → redsocks :${REDSOCKS_PORT} → SOCKS5 ${VPN_PORT} → VPN exit ${vpn.ip} (${vpn.country || "auto"})`,
+    );
+    log(
+      `  lock     : uid ${uid} TCP forced through the VPN; IPv6 + non-DNS UDP dropped; loopback/private exempt`,
+    );
+  }
   log(
     `  free tier: oc/* → compat :${FREE_PORT} → zen-proxy :${FREE_ZEN_PORT} → ${FREE_UPSTREAM} (proved with ${FREE_MODEL})`,
   );
   log(
-    `  verified : uid probe answered from the VPN exit / app proxy ${egress.ok ? `reaches ${egress.ip}` : "unverified"}${routed ? " / provider call seen in the bridge log" : ""}`,
+    `  verified : ${skipVpn ? "direct egress (no VPN check)" : `uid probe answered from the VPN exit / app proxy ${egressOk ? `reaches ${vpn.ip}` : "unverified"}${routed ? " / provider call seen in the bridge log" : ""}`}`,
   );
-  log(`  SOCKS5   : 127.0.0.1:${VPN_PORT} (user router, password is per-run and not printed)`);
+  if (!skipVpn) {
+    log(`  SOCKS5   : 127.0.0.1:${VPN_PORT} (user router, password is per-run and not printed)`);
+  }
   log(`  data     : ${DATA_DIR}`);
 }
 

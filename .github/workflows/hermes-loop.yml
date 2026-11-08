@@ -34,6 +34,11 @@ on:
         type: string
         required: false
         default: "18900"
+      no_vpn:
+        description: "Run without the Firefox VPN (diagnostic only, degraded)"
+        type: choice
+        options: [no, yes]
+        default: "no"
 
 # The relay must never double up: one queued run waits for the running one.
 concurrency:
@@ -52,6 +57,7 @@ jobs:
     env:
       SLOT: ${{ inputs.runner || 'a' }}
       SESSION_SECONDS: ${{ inputs.session_seconds || '18900' }}
+      NO_VPN_INPUT: ${{ inputs.no_vpn || 'no' }}
 
       # 9router
       ROUTER_PORT: "20128"
@@ -60,6 +66,8 @@ jobs:
       NINE_RUN_USER: "nine"
       ROUTER_DOMAIN: "local.invalid"
       SKIP_TUNNEL: "1"
+      # SKIP_VPN=1 puts 9router on the runner's own IP instead of the VPN.
+      SKIP_VPN: ${{ inputs.no_vpn == 'yes' && '1' || '' }}
       RESTORE_BACKUP: "true"
 
       # Firefox/Mozilla VPN credentials for the 9router egress (FoxyVPN flow).
@@ -108,6 +116,7 @@ jobs:
       # FoxyVPN's login flow: refresh token -> Mozilla OAuth -> Guardian pass.
       # Writes the refreshed archive into GITHUB_ENV for router.mjs.
       - name: Refresh the Firefox VPN login
+        if: ${{ inputs.no_vpn != 'yes' }}
         run: node scripts/runner-router-foxy/login.mjs
 
       # VPN first, proved, then 9router installed behind its uid egress lock
@@ -176,7 +185,7 @@ jobs:
           ok=0
           for i in 1 2 3; do
             if gh workflow run hermes-loop.yml --ref "$GITHUB_REF_NAME" -f runner="$NEXT" \
-                 -f session_seconds="$SESSION_SECONDS"; then
+                 -f session_seconds="$SESSION_SECONDS" -f no_vpn="$NO_VPN_INPUT"; then
               ok=1
               break
             fi
