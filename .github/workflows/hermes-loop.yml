@@ -97,6 +97,12 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_ALLOWED_USERS: ${{ secrets.TELEGRAM_ALLOWED_USERS }}
 
+      # While the session is live, the Hermes home is snapshotted every 15
+      # minutes. A hard kill (cancelled job, dead VM, forced 6h stop) never
+      # reaches the handoff backup, so without this the whole session would be
+      # lost; with it, at most one window is.
+      SNAPSHOT_INTERVAL_SECONDS: "900"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -159,12 +165,38 @@ jobs:
           SLEEP=$(( DEADLINE - NOW ))
           [ "$SLEEP" -lt 0 ] && SLEEP=0
           echo "Handoff at $(date -u -d "@$DEADLINE" +%FT%TZ) — sleeping ${SLEEP}s"
+
+          # Periodic snapshots. The handoff backup below only runs when the
+          # session ends on schedule; a cancelled or killed job skips it, so the
+          # home is also written every SNAPSHOT_INTERVAL_SECONDS. flock keeps the
+          # periodic writer and the handoff writer from touching the release at
+          # the same time.
+          SNAP_STOP="${RUNNER_TEMP:-/tmp}/hermes-snapshot.stop"
+          SNAP_LOCK="${RUNNER_TEMP:-/tmp}/hermes-snapshot.lock"
+          rm -f "$SNAP_STOP"
+          snap() { flock -w 1800 "$SNAP_LOCK" node scripts/hermes/state.mjs backup; }
+          snap || echo "::warning::the first Hermes snapshot failed; the session keeps running"
+          (
+            while [ ! -e "$SNAP_STOP" ]; do
+              sleep "$SNAPSHOT_INTERVAL_SECONDS"
+              [ -e "$SNAP_STOP" ] && break
+              snap || echo "::warning::periodic Hermes snapshot failed; retrying at the next window"
+            done
+          ) &
+          SNAP_LOOP=$!
+          # Cancellation path: stop the loop so it cannot fight the cleanup step.
+          trap 'touch "$SNAP_STOP"; kill "$SNAP_LOOP" 2>/dev/null || true' EXIT
+
           sleep "$SLEEP"
+
+          # Deadline reached: stop the writer, then take the final snapshot.
+          touch "$SNAP_STOP"
+          kill "$SNAP_LOOP" 2>/dev/null || true
+          wait "$SNAP_LOOP" 2>/dev/null || true
 
           echo "::group::Hermes backup"
           # WAL-safe while the gateway runs, so the snapshot is taken first.
-          node scripts/hermes/state.mjs backup \
-            || echo "::warning::the Hermes backup failed; the previous snapshot stays in place"
+          snap || echo "::warning::the Hermes backup failed; the previous snapshot stays in place"
           echo "::endgroup::"
 
           # Telegram: exactly one poller at a time. Stop before the next runner.
