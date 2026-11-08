@@ -1,0 +1,204 @@
+name: hermes-loop
+
+# One half of a two-runner relay. A run brings 9router (behind its VPN egress
+# lock) and Hermes (Telegram) up on a fresh GitHub runner, keeps them alive for
+# ~5h15m, then hands the baton to the other half just before the 6-hour job cap.
+#
+#   runner a  --dispatch-->  runner b  --dispatch-->  runner a  --...
+#
+# The relay runs strictly one at a time (single concurrency group): Telegram
+# allows exactly one long-poller per bot token, so the next runner may only start
+# polling after the previous one stopped. Messages sent during the gap are not
+# lost — `drop_pending_on_cold_boot: false` makes the next gateway deliver them.
+#
+# State lives in two encrypted release assets of this repository, never in git:
+#   tag hermes-state    hermes-state.zip.enc        (the Hermes home)
+#   tag router-backup   9router-state.tar.gz.enc    (9router db + jwt secret)
+#
+# The 9router snapshot is written once and then left alone, so the API key
+# Hermes uses is the same on every runner.
+#
+# Nothing is exposed to the internet: no tunnel, no domain. Hermes reaches
+# 9router on 127.0.0.1:20128.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Which half of the pair starts (it dispatches the other one)"
+        type: choice
+        options: [a, b]
+        default: a
+      session_seconds:
+        description: "Seconds of uptime before the handoff (job cap is 21600)"
+        type: string
+        required: false
+        default: "18900"
+
+# The relay must never double up: one queued run waits for the running one.
+concurrency:
+  group: hermes-loop
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # release assets (both snapshots)
+  actions: write    # workflow_dispatch fallback
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    env:
+      SLOT: ${{ inputs.runner || 'a' }}
+      SESSION_SECONDS: ${{ inputs.session_seconds || '18900' }}
+
+      # 9router
+      ROUTER_PORT: "20128"
+      NINE_ROUTER_PASSWORD: ${{ secrets.NINE_ROUTER_PASSWORD }}
+      NINE_DATA_DIR: "/var/lib/9router"
+      NINE_RUN_USER: "nine"
+      ROUTER_DOMAIN: "local.invalid"
+      SKIP_TUNNEL: "1"
+      RESTORE_BACKUP: "true"
+
+      # Firefox/Mozilla VPN credentials for the 9router egress (FoxyVPN flow).
+      # Either the archived accounts or one refresh token is enough.
+      FXA_ACCOUNTS_TGZ_B64: ${{ secrets.FXA_ACCOUNTS_TGZ_B64 }}
+      FOXY_ACCOUNTS_TGZ_B64: ${{ secrets.FOXY_ACCOUNTS_TGZ_B64 }}
+      FOXY_REFRESH_TOKEN: ${{ secrets.FOXY_REFRESH_TOKEN }}
+      FXA_COUNTRY: "random"
+      FXA_TRANSPORT: "h2"
+      FXA_PROXY_PORT: "10810"
+      FXA_TRIES: "3"
+      FXA_UPSTREAM_CONNECTIONS: "4"
+
+      # Backups: this repository, the personal token (it also dispatches the
+      # next run — the automatic GITHUB_TOKEN cannot trigger workflows).
+      BACKUP_REPO: ${{ github.repository }}
+      BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+
+      # Hermes
+      HERMES_MODEL: "oc/deepseek-v4.1-flash-free"
+      NINE_ROUTER_BASE_URL: "http://127.0.0.1:20128/v1"
+      HERMES_CONTEXT_LENGTH: "200000"
+      NINE_KEY_FILE: ${{ runner.temp }}/nine-key
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_ALLOWED_USERS: ${{ secrets.TELEGRAM_ALLOWED_USERS }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Record the session window
+        run: |
+          set -euo pipefail
+          START=$(date +%s)
+          echo "JOB_START=${START}" >> "$GITHUB_ENV"
+          echo "Runner ${SLOT}, session ${SESSION_SECONDS}s, start $(date -u +%FT%TZ)"
+
+      - name: Record the runner's public IP
+        run: echo "RUNNER_PUBLIC_IP=$(curl -s --max-time 15 https://api.ipify.org)" >> "$GITHUB_ENV"
+
+      # FoxyVPN's login flow: refresh token -> Mozilla OAuth -> Guardian pass.
+      # Writes the refreshed archive into GITHUB_ENV for router.mjs.
+      - name: Refresh the Firefox VPN login
+        run: node scripts/runner-router-foxy/login.mjs
+
+      # VPN first, proved, then 9router installed behind its uid egress lock
+      # (no Cloudflare: SKIP_TUNNEL=1).
+      - name: Start 9Router and the VPN
+        timeout-minutes: 50
+        run: node scripts/runner-router/router.mjs start
+
+      # Reuse the key stored in the restored 9router database; mint one only if
+      # the database was empty. The value never reaches the log.
+      - name: Resolve the 9router API key
+        run: node scripts/hermes/nine-key.mjs "$NINE_KEY_FILE"
+
+      # Hermes: install, import the encrypted snapshot, pin the model, write
+      # .env, start the gateway, prove one real turn, note it on Telegram.
+      - name: Bring Hermes up
+        timeout-minutes: 45
+        run: bash scripts/hermes/boot.sh
+
+      - name: Say hello on Telegram
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          CHAT="${TELEGRAM_ALLOWED_USERS%%,*}"
+          hermes send --to "telegram:${CHAT}" \
+            "🟢 Hermes is up on runner ${SLOT}. Next handoff in ~$((SESSION_SECONDS / 3600))h." || true
+
+      # The long part: sleep to the deadline, back up, stop polling, hand over.
+      - name: Serve until the handoff
+        timeout-minutes: 335
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          NEXT=$([ "$SLOT" = "a" ] && echo b || echo a)
+
+          NOW=$(date +%s)
+          DEADLINE=$(( JOB_START + SESSION_SECONDS ))
+          SLEEP=$(( DEADLINE - NOW ))
+          [ "$SLEEP" -lt 0 ] && SLEEP=0
+          echo "Handoff at $(date -u -d "@$DEADLINE" +%FT%TZ) — sleeping ${SLEEP}s"
+          sleep "$SLEEP"
+
+          echo "::group::Hermes backup"
+          # WAL-safe while the gateway runs, so the snapshot is taken first.
+          node scripts/hermes/state.mjs backup \
+            || echo "::warning::the Hermes backup failed; the previous snapshot stays in place"
+          echo "::endgroup::"
+
+          # Telegram: exactly one poller at a time. Stop before the next runner.
+          echo "::group::Stop the gateway"
+          hermes gateway stop --yes || true
+          pkill -f "hermes gateway run" || true
+          sleep 5
+          pgrep -af "hermes gateway run" || echo "gateway stopped"
+          echo "::endgroup::"
+
+          echo "::group::9router teardown"
+          # Archives only when the key was minted in this run (NINE_ROTATE_BACKUP),
+          # otherwise the existing snapshot is kept on purpose. Always drops the
+          # kernel lock.
+          NINE_ROTATE_BACKUP="${NINE_KEY_MINTED:+1}" \
+            node scripts/runner-router/router.mjs stop || true
+          echo "::endgroup::"
+
+          echo "::group::Dispatch runner ${NEXT}"
+          ok=0
+          for i in 1 2 3; do
+            if gh workflow run hermes-loop.yml --ref "$GITHUB_REF_NAME" -f runner="$NEXT" \
+                 -f session_seconds="$SESSION_SECONDS"; then
+              ok=1
+              break
+            fi
+            echo "dispatch attempt ${i} failed; retrying in 20s"
+            sleep 20
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::could not dispatch runner ${NEXT} — the watchdog will retry"
+            exit 1
+          fi
+          echo "Runner ${NEXT} dispatched."
+          echo "::endgroup::"
+
+      # Safety net for any exit path (failures, cancellation, the 350-minute
+      # timeout). Both commands are idempotent and archive nothing when there is
+      # nothing new to archive.
+      - name: Stop the gateway and the router
+        if: always()
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          hermes gateway stop --yes 2>/dev/null || true
+          pkill -f "hermes gateway run" 2>/dev/null || true
+          NINE_ROTATE_BACKUP="${NINE_KEY_MINTED:+1}" \
+            node scripts/runner-router/router.mjs stop 2>/dev/null || true

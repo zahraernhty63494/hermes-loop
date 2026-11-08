@@ -1,0 +1,42 @@
+name: hermes-loop-watchdog
+
+# The relay dispatches itself, but a run can die hard: a 6-hour kill, a failed
+# VPN login, a cancelled workflow. This watchdog closes that hole — if no
+# hermes-loop run is queued or running, it starts one.
+#
+# It never touches a healthy relay: any queued/running run makes it a no-op.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: hermes-loop-watchdog
+  cancel-in-progress: false
+
+jobs:
+  restart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Dispatch the loop when nothing is running
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ACTIVE=$(gh api "repos/${REPO}/actions/workflows/hermes-loop.yml/runs?per_page=30" \
+            --jq '[.workflow_runs[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "requested" or .status == "pending")] | length')
+          echo "active hermes-loop runs: ${ACTIVE}"
+          if [ "${ACTIVE}" -gt 0 ]; then
+            echo "the relay is alive — nothing to do"
+            exit 0
+          fi
+          BRANCH=$(gh api "repos/${REPO}" --jq .default_branch)
+          echo "the relay is down — starting runner a on ${BRANCH}"
+          gh workflow run hermes-loop.yml --ref "${BRANCH}" -f runner=a

@@ -1,0 +1,84 @@
+# hermes-loop
+
+یک رلهٔ دو-رانره روی GitHub Actions: هر رانر ۹روتر را پشت قفل خروجی VPN بالا می‌آورد،
+Hermes را به تلگرام وصل می‌کند، حدود ۵ ساعت و ۱۵ دقیقه سرویس می‌دهد و پیش از پایان
+۶ ساعت، رانر بعدی را صدا می‌زند. رانر بعدی همان وضعیت را از بکاپ رمزنگاری‌شده برمی‌گرداند.
+
+```
+runner a ──dispatch──► runner b ──dispatch──► runner a ──► ...
+   ▲                                                │
+   └────────────── watchdog (هر ۳۰ دقیقه) ───────────┘
+```
+
+هیچ تونل/دامنه/پورت عمومی وجود ندارد. Hermes از طریق `127.0.0.1:20128` با ۹روتر حرف
+می‌زند و خودِ Hermes مسئول اتصال تلگرام است.
+
+## چیدمان
+
+| مسیر | کار |
+| --- | --- |
+| `.github/workflows/hermes-loop.yml` | یک نیمه از رله: نصب، اجرا، بکاپ، dispatch بعدی |
+| `.github/workflows/watchdog.yml` | اگر هیچ رانری فعال نبود، رله را از نو روشن می‌کند |
+| `scripts/runner-router/` | ۹روتر + VPN (awmvpn) + zen-proxy + قفل خروجی uid |
+| `scripts/runner-router-foxy/login.mjs` | تازه‌سازی ورود FoxyVPN |
+| `scripts/freestyle-router/bootstrap.sh` | نصب ۹روتر و unit سیستم‌د |
+| `scripts/hermes/boot.sh` | نصب/بازیابی/پیکربندی/استارت Hermes |
+| `scripts/hermes/state.mjs` | بکاپ و بازیابی رمزنگاری‌شدهٔ `~/.hermes` |
+| `scripts/hermes/nine-key.mjs` | خواندن یا ساختِ کلید ثابت ۹روتر |
+| `scripts/hermes/env.mjs` | نوشتن امن مقادیر حساس در `~/.hermes/.env` |
+
+## وضعیت‌ها کجا ذخیره می‌شوند
+
+دو asset رمزنگاری‌شده در Release‌های همین ریپو (نه در گیت):
+
+* تگ `hermes-state` → `hermes-state.zip.enc` و نسخهٔ قبلی `.prev`
+  (کل `~/.hermes`: حافظه، سشن‌ها، مهارت‌ها، config، .env، `state.db`)
+* تگ `router-backup` → `9router-state.tar.gz.enc`
+  (دیتابیس ۹روتر + `jwt-secret`؛ همان کلید API همیشه حفظ می‌شود)
+
+هر دو با `BACKUP_ENCRYPTION_KEY` و AES-256-GCM مهر می‌شوند. Release عمومی است، اما
+بدون کلید قابل استفاده نیست.
+
+**بکاپ ۹روتر هر بار بازنویسی نمی‌شود.** اولین اسنپ‌شات ساخته می‌شود و بعد از آن
+دست‌نخورده می‌ماند تا کلید API عوض نشود. فقط اگر در یک اجرا کلید تازه ساخته شده باشد
+(`NINE_KEY_MINTED=1`) اسنپ‌شات به‌روز می‌شود. برای چرخش دستی:
+
+```bash
+NINE_ROTATE_BACKUP=1 NINE_KEY_MINTED=1 node scripts/runner-router/router.mjs stop
+```
+
+## سکرت‌ها
+
+| نام | توضیح |
+| --- | --- |
+| `GH_PAT` | توکن با `repo` + `workflow` (برای dispatch و assetها) |
+| `NINE_ROUTER_PASSWORD` | رمز پنل ۹روتر (فقط داخلی) |
+| `BACKUP_ENCRYPTION_KEY` | رمز بکاپ‌ها؛ اگر عوض شود بکاپ‌های قبلی خوانده نمی‌شوند |
+| `TELEGRAM_BOT_TOKEN` | توکن ربات تلگرام |
+| `TELEGRAM_ALLOWED_USERS` | آیدی عددی کاربر مجاز |
+| `FXA_ACCOUNTS_TGZ_B64` یا `FOXY_REFRESH_TOKEN` | ورود VPN فایرفاکس (حداقل یکی) |
+
+## اجرا
+
+```bash
+gh workflow run hermes-loop.yml -f runner=a
+```
+
+بعد از آن رله خودش می‌چرخد. `watchdog.yml` هر ۳۰ دقیقه بررسی می‌کند که آیا اجرایی
+در جریان است؛ اگر نه، دوباره `runner=a` را صدا می‌زند.
+
+## نکات مهم
+
+* **یک پولر در هر لحظه.** تلگرام برای هر توکن فقط یک long-poll قبول می‌کند؛ به همین
+  دلیل `concurrency: hermes-loop` رانرها را سریالی می‌کند. در فاصلهٔ تعویض (حدود
+  ۱۰ تا ۱۵ دقیقه، به‌اندازهٔ نصب رانر جدید) پیام‌ها در صف تلگرام می‌مانند و با
+  `drop_pending_on_cold_boot: false` تحویل داده می‌شوند.
+* **سقف ۶ ساعت.** هر job حداکثر ۶ ساعت است؛ `SESSION_SECONDS` پیش‌فرض ۱۸۹۰۰ ثانیه
+  (۵:۱۵) است تا برای نصب و teardown جا بماند.
+* **مدل تک و ثابت:** `oc/deepseek-v4.1-flash-free` با `context_length: 200000`.
+  `auxiliary.background_review` و تولید عنوان خودکار خاموش‌اند تا مصرف free-tier
+  دو برابر نشود.
+* **قفل خروجی فقط برای uid کاربر `nine`** است؛ ترافیک تلگرام/گیت خود Hermes مستقیم
+  می‌رود.
+* استفادهٔ ۲۴/۷ از رانرهای عمومی GitHub از نظر ToS خاکستری است؛ این ریپو و ورک‌فلو
+  عمومی است و هزینه‌ای روی حساب شما نمی‌گذارد، اما مسئولیتش با شماست.
