@@ -1762,12 +1762,19 @@ async function stop() {
       # A start that failed before the install finished must still not turn the
       # always() archive step into a second, unrelated failure.
       if ! sudo test -d ${DATA_DIR}; then echo "NO_DATA_DIR"; exit 0; fi
+      # A run that died before the app ever started has no database yet; that is
+      # not an error, and tar must not abort the whole stop because of it.
+      if ! sudo test -e ${DATA_DIR}/db; then echo "NO_DB"; exit 0; fi
       sudo bash -c "cd ${DATA_DIR} || exit 1
         tar czf ${file} db 9router-export.json jwt-secret 2>/dev/null || tar czf ${file} db"
       sudo chmod 644 ${file}
       ls -l ${file}
     `, { timeout: 300_000 });
     for (const line of out.split("\n").filter(Boolean)) log(`    ${line}`);
+    if (/\bNO_DATA_DIR\b|\bNO_DB\b/.test(out)) {
+      log("• Nothing to archive — 9router never wrote its state on this runner");
+      return;
+    }
 
     const tar = await readFile(file).catch(() => null);
     if (!tar) {

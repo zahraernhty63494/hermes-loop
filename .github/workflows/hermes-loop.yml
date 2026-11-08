@@ -212,4 +212,4 @@ jobs:
           hermes gateway stop --yes 2>/dev/null || true
           pkill -f "hermes gateway run" 2>/dev/null || true
           NINE_ROTATE_BACKUP="${NINE_KEY_MINTED:+1}" \
-            node scripts/runner-router/router.mjs stop 2>/dev/null || true
+            node scripts/runner-router/router.mjs stop || true
