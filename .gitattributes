@@ -1,0 +1,5 @@
+# Shell scripts and YAML are executed on Linux; keep them LF even when the
+# repository is edited from Windows.
+* text=auto eol=lf
+*.png binary
+*.zip binary
