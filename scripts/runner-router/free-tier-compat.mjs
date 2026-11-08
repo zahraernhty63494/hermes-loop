@@ -39,6 +39,39 @@ const DROP = new Set([
 
 const HOP = new Set(["content-encoding", "content-length", "transfer-encoding", "connection", "keep-alive"]);
 
+// The free lane answers the way the OpenCode client asks: OpenCode computes an
+// output budget and sends it. Hermes deliberately omits max_tokens (see
+// NousResearch/hermes-agent#4404), so a reasoning model can spend the server's
+// small default entirely on thinking and return an empty message — the
+// "thinking-only / empty response / No reply" loop seen in Telegram. OpenCode
+// itself never hits that because it always sends its own budget.
+// So: give every request the free lane's official output ceiling (32k) when the
+// caller asked for nothing, and never override a caller that did ask.
+const DEFAULT_OUTPUT_TOKENS = Number(process.env.FREE_TIER_MAX_OUTPUT || 32000);
+
+function withBudget(raw, pathname) {
+  if (!raw.length) return { body: raw, budget: "none" };
+  let payload;
+  try {
+    payload = JSON.parse(raw.toString("utf8"));
+  } catch {
+    return { body: raw, budget: "unparsed" };
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { body: raw, budget: "unparsed" };
+  }
+  const asked = payload.max_output_tokens ?? payload.max_completion_tokens ?? payload.max_tokens;
+  if (asked != null) return { body: raw, budget: `caller(${asked})` };
+  if (!Number.isFinite(DEFAULT_OUTPUT_TOKENS) || DEFAULT_OUTPUT_TOKENS <= 0) {
+    return { body: raw, budget: "none" };
+  }
+  // The field name follows the protocol, not the request: Anthropic /messages
+  // and chat both use max_tokens, the Responses API uses max_output_tokens.
+  const key = /\/responses\/?$/.test(pathname) ? "max_output_tokens" : "max_tokens";
+  payload[key] = DEFAULT_OUTPUT_TOKENS;
+  return { body: Buffer.from(JSON.stringify(payload)), budget: `injected(${DEFAULT_OUTPUT_TOKENS})` };
+}
+
 function route(pathname) {
   const path = pathname.split("?")[0];
   if (/\/messages\/?$/.test(path)) return "/v1/messages";
@@ -65,12 +98,17 @@ const server = http.createServer(async (req, res) => {
   if (!headers["content-type"] && body.length) headers["content-type"] = "application/json";
 
   const target = `${upstream}${route(req.url || "/")}`;
+  // Only JSON bodies carry a token budget; leave form bodies and GETs alone.
+  const type = String(req.headers["content-type"] || "").toLowerCase();
+  const jsonish = type.includes("json") || (!type && body.length > 0);
+  const { body: sendBody, budget } =
+    req.method === "POST" && jsonish ? withBudget(body, route(req.url || "/")) : { body, budget: "none" };
   const started = Date.now();
   try {
     const up = await fetch(target, {
       method: req.method,
       headers,
-      body: req.method === "GET" || req.method === "HEAD" ? undefined : body,
+      body: req.method === "GET" || req.method === "HEAD" ? undefined : sendBody,
     });
     const out = {};
     up.headers.forEach((v, k) => {
@@ -82,7 +120,7 @@ const server = http.createServer(async (req, res) => {
     }
     res.end();
     console.log(
-      `${new Date().toISOString()} ${req.method} ${req.url} -> ${target} ${up.status} ${Date.now() - started}ms`,
+      `${new Date().toISOString()} ${req.method} ${req.url} -> ${target} ${up.status} ${Date.now() - started}ms budget=${budget}`,
     );
   } catch (err) {
     res.writeHead(502, { "content-type": "application/json" });

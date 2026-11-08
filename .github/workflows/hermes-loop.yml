@@ -245,3 +245,9 @@ jobs:
           pkill -f "hermes gateway run" 2>/dev/null || true
           NINE_ROTATE_BACKUP="${NINE_KEY_MINTED:+1}" \
             node scripts/runner-router/router.mjs stop || true
+          # Every free-tier request is logged with its token budget and status,
+          # so the next session's run log shows whether the empty replies were
+          # budget starvation or upstream throttling.
+          echo "::group::Free-tier log (last 60)"
+          sudo tail -60 /var/log/9router-zen.log 2>/dev/null || true
+          echo "::endgroup::"
