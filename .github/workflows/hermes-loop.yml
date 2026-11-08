@@ -37,7 +37,7 @@ on:
       no_vpn:
         description: "Run without the Firefox VPN (diagnostic only, degraded)"
         type: choice
-        options: [no, yes]
+        options: ["no", "yes"]
         default: "no"
 
 # The relay must never double up: one queued run waits for the running one.
@@ -92,7 +92,8 @@ jobs:
       HERMES_MODEL: "oc/deepseek-v4.1-flash-free"
       NINE_ROUTER_BASE_URL: "http://127.0.0.1:20128/v1"
       HERMES_CONTEXT_LENGTH: "200000"
-      NINE_KEY_FILE: ${{ runner.temp }}/nine-key
+      # NINE_KEY_FILE is set from $RUNNER_TEMP in the first step: the `runner`
+      # context is not available to job-level env expressions.
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_ALLOWED_USERS: ${{ secrets.TELEGRAM_ALLOWED_USERS }}
 
@@ -108,6 +109,7 @@ jobs:
           set -euo pipefail
           START=$(date +%s)
           echo "JOB_START=${START}" >> "$GITHUB_ENV"
+          echo "NINE_KEY_FILE=${RUNNER_TEMP}/nine-key" >> "$GITHUB_ENV"
           echo "Runner ${SLOT}, session ${SESSION_SECONDS}s, start $(date -u +%FT%TZ)"
 
       - name: Record the runner's public IP
