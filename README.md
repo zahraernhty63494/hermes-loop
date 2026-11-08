@@ -26,6 +26,7 @@ runner a ──dispatch──► runner b ──dispatch──► runner a ─�
 | `scripts/hermes/extras.sh` | نصب ابزارهای هر سشن (ffmpeg، whisper.cpp) روی رانر تازه |
 | `scripts/hermes/state.mjs` | بکاپ و بازیابی رمزنگاری‌شدهٔ `~/.hermes` |
 | `scripts/hermes/nine-key.mjs` | خواندن یا ساختِ کلید ثابت ۹روتر |
+| `scripts/hermes/fallback.mjs` | ساخت/به‌روزرسانی combo فالبک در ۹روتر |
 | `scripts/hermes/env.mjs` | نوشتن امن مقادیر حساس در `~/.hermes/.env` |
 
 ## وضعیت‌ها کجا ذخیره می‌شوند
@@ -68,6 +69,23 @@ NINE_ROTATE_BACKUP=1 NINE_KEY_MINTED=1 node scripts/runner-router/router.mjs sto
 با همان الگوی `have <binary>` به انتهای فایل اضافه کنید؛ مدل‌های بزرگ را داخل
 `~/.hermes` نگذارید، چون هر ۱۵ دقیقه آپلود می‌شوند.
 
+## زنجیرهٔ فالبک مدل
+
+`scripts/hermes/fallback.mjs` بعد از ساخت کلید، combo‌ای به نام `hermes-free` در
+9router می‌سازد یا به‌روز می‌کند:
+
+1. `oc/deepseek-v4.1-flash-free` (مدل اصلی)
+2. `oc/mimo-v2.5-free`
+3. `oc/glm-5.3-flash-free`
+
+اگر مدلی در `/v1/models` نبود، با `::warning::` رد می‌شود (لیست مدل‌های free
+تغییر می‌کند). مسیر combo در 9router روی **پاسخ خالی** (حتی وقتی فقط reasoning
+برگشته) و روی ۴۲۹/۵۰۲/۵۰۳/۵۰۴ به مدل بعدی fallback می‌کند. Hermes فقط وقتی به
+combo سوییچ می‌شود که ساختش موفق بوده باشد؛ وگرنه روی مدل اصلی می‌ماند.
+
+تغییر لیست با env: `HERMES_PRIMARY_MODEL`، `HERMES_FALLBACK_MODELS`،
+`FALLBACK_COMBO`.
+
 ## سکرت‌ها
 
 | نام | توضیح |
@@ -109,9 +127,11 @@ free-tier جواب بدهد، `probeFreeTier` در لاگ `HTTP 200` می‌ده
   `drop_pending_on_cold_boot: false` تحویل داده می‌شوند.
 * **سقف ۶ ساعت.** هر job حداکثر ۶ ساعت است؛ `SESSION_SECONDS` پیش‌فرض ۱۸۹۰۰ ثانیه
   (۵:۱۵) است تا برای نصب و teardown جا بماند.
-* **مدل تک و ثابت:** `oc/deepseek-v4.1-flash-free` با `context_length: 200000`.
-  `auxiliary.background_review` و تولید عنوان خودکار خاموش‌اند تا مصرف free-tier
-  دو برابر نشود.
+* **مدل اصلی ثابت است، با یک زنجیرهٔ فالبک:** `oc/deepseek-v4.1-flash-free` با
+  `context_length: 200000`. اگر پاسخ خالی/فقط-reasoning برگردد یا ۴۲۹/۵xx بدهد،
+  9router روی `oc/mimo-v2.5-free` و بعد `oc/glm-5.3-flash-free` می‌رود (combo
+  `hermes-free`). `auxiliary.background_review` و تولید عنوان خودکار خاموش‌اند تا
+  مصرف free-tier دو برابر نشود.
 * **قفل خروجی فقط برای uid کاربر `nine`** است؛ ترافیک تلگرام/گیت خود Hermes مستقیم
   می‌رود.
 * **کرون watchdog بعد از ۶۰ روز بی‌فعالیتیِ ریپو خودکار خاموش می‌شود.** اگر مدتی هیچ

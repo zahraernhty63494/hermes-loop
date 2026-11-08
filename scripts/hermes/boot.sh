@@ -13,7 +13,7 @@ log() { printf '\n== %s ==\n' "$*"; }
 export PATH="$HOME/.local/bin:$PATH"
 export HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 
-MODEL="${HERMES_MODEL:-oc/deepseek-v4.1-flash-free}"
+MODEL="${HERMES_MODEL_OVERRIDE:-${HERMES_MODEL:-oc/deepseek-v4.1-flash-free}}"
 BASE_URL="${NINE_ROUTER_BASE_URL:-http://127.0.0.1:20128/v1}"
 CONTEXT="${HERMES_CONTEXT_LENGTH:-200000}"
 KEY_FILE="${NINE_KEY_FILE:?NINE_KEY_FILE is not set}"

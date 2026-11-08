@@ -89,7 +89,13 @@ jobs:
       GH_PAT: ${{ secrets.GH_PAT }}
 
       # Hermes
+      # The primary is what the loop pins; fallback.mjs turns the three free
+      # models into a 9router combo and points Hermes at it, so an empty or
+      # rate-limited answer falls over instead of ending in "No reply".
       HERMES_MODEL: "oc/deepseek-v4.1-flash-free"
+      HERMES_PRIMARY_MODEL: "oc/deepseek-v4.1-flash-free"
+      HERMES_FALLBACK_MODELS: "oc/mimo-v2.5-free,oc/glm-5.3-flash-free"
+      FALLBACK_COMBO: "hermes-free"
       NINE_ROUTER_BASE_URL: "http://127.0.0.1:20128/v1"
       HERMES_CONTEXT_LENGTH: "200000"
       # NINE_KEY_FILE is set from $RUNNER_TEMP in the first step: the `runner`
@@ -137,6 +143,13 @@ jobs:
       # the database was empty. The value never reaches the log.
       - name: Resolve the 9router API key
         run: node scripts/hermes/nine-key.mjs "$NINE_KEY_FILE"
+
+      # A reasoning model can spend its whole turn thinking and return no text.
+      # 9router's combo path retries the next seat on empty content, and on
+      # 429/5xx. The combo is written into the 9router db (which the relay
+      # backs up), and Hermes switches to it only when it exists.
+      - name: Define the free-tier fallback chain
+        run: node scripts/hermes/fallback.mjs
 
       # Hermes: install, import the encrypted snapshot, pin the model, write
       # .env, start the gateway, prove one real turn, note it on Telegram.
