@@ -2,7 +2,7 @@
 # Bring Hermes up on a fresh GitHub runner, on top of the 9router that
 # router.mjs already installed behind its VPN lock.
 #
-#   install  ->  restore  ->  pin the model  ->  secrets  ->  gateway
+#   install  ->  restore  ->  extras  ->  pin the model  ->  secrets  ->  gateway
 #
 # Everything that must survive the 6-hour job boundary lives in the encrypted
 # release asset restored here; nothing is written to the repository.
@@ -37,6 +37,11 @@ hermes --version
 
 log "restore"
 node scripts/hermes/state.mjs restore
+
+log "extras"
+# Rebuilds the tools a fresh runner has to have (ffmpeg, whisper.cpp). Never
+# fatal: a failed install costs a capability, not the session.
+bash scripts/hermes/extras.sh || echo "::warning::extras failed; the session starts without them"
 
 log "pin the model"
 mkdir -p "$HERMES_HOME"

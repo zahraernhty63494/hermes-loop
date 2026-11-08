@@ -23,6 +23,7 @@ runner a ──dispatch──► runner b ──dispatch──► runner a ─�
 | `scripts/runner-router-foxy/login.mjs` | تازه‌سازی ورود FoxyVPN |
 | `scripts/freestyle-router/bootstrap.sh` | نصب ۹روتر و unit سیستم‌د |
 | `scripts/hermes/boot.sh` | نصب/بازیابی/پیکربندی/استارت Hermes |
+| `scripts/hermes/extras.sh` | نصب ابزارهای هر سشن (ffmpeg، whisper.cpp) روی رانر تازه |
 | `scripts/hermes/state.mjs` | بکاپ و بازیابی رمزنگاری‌شدهٔ `~/.hermes` |
 | `scripts/hermes/nine-key.mjs` | خواندن یا ساختِ کلید ثابت ۹روتر |
 | `scripts/hermes/env.mjs` | نوشتن امن مقادیر حساس در `~/.hermes/.env` |
@@ -52,6 +53,20 @@ runner a ──dispatch──► runner b ──dispatch──► runner a ─�
 ```bash
 NINE_ROTATE_BACKUP=1 NINE_KEY_MINTED=1 node scripts/runner-router/router.mjs stop
 ```
+
+## ابزارهای هر سشن (extras)
+
+هر رانر یک VM تازه است، پس هر چیزی بیرون از `~/.hermes` با تحویل رانر از بین می‌رود.
+`scripts/hermes/extras.sh` در ابتدای boot (بعد از restore) این‌ها را idempotent نصب
+می‌کند:
+
+* `ffmpeg` — اگر روی image نباشد، از apt
+* `whisper.cpp` در `/opt/whisper.cpp` + مدل `ggml-base.bin` + دستور `whisper <audio>`
+
+نصب غیرمرگبار است: شکست هر کدام فقط `::warning::` می‌دهد و سشن بالا می‌آید. برای
+خاموش کردن کل این مرحله `HERMES_EXTRAS=0` را در env ورک‌فلو بگذارید. ابزار جدید را
+با همان الگوی `have <binary>` به انتهای فایل اضافه کنید؛ مدل‌های بزرگ را داخل
+`~/.hermes` نگذارید، چون هر ۱۵ دقیقه آپلود می‌شوند.
 
 ## سکرت‌ها
 
