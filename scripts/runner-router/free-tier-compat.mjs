@@ -50,26 +50,27 @@ const HOP = new Set(["content-encoding", "content-length", "transfer-encoding", 
 const DEFAULT_OUTPUT_TOKENS = Number(process.env.FREE_TIER_MAX_OUTPUT || 32000);
 
 function withBudget(raw, pathname) {
-  if (!raw.length) return { body: raw, budget: "none" };
+  if (!raw.length) return { body: raw, budget: "none", stream: null };
   let payload;
   try {
     payload = JSON.parse(raw.toString("utf8"));
   } catch {
-    return { body: raw, budget: "unparsed" };
+    return { body: raw, budget: "unparsed", stream: null };
   }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return { body: raw, budget: "unparsed" };
+    return { body: raw, budget: "unparsed", stream: null };
   }
   const asked = payload.max_output_tokens ?? payload.max_completion_tokens ?? payload.max_tokens;
-  if (asked != null) return { body: raw, budget: `caller(${asked})` };
+  const stream = payload.stream === true;
+  if (asked != null) return { body: raw, budget: `caller(${asked})`, stream };
   if (!Number.isFinite(DEFAULT_OUTPUT_TOKENS) || DEFAULT_OUTPUT_TOKENS <= 0) {
-    return { body: raw, budget: "none" };
+    return { body: raw, budget: "none", stream };
   }
   // The field name follows the protocol, not the request: Anthropic /messages
   // and chat both use max_tokens, the Responses API uses max_output_tokens.
   const key = /\/responses\/?$/.test(pathname) ? "max_output_tokens" : "max_tokens";
   payload[key] = DEFAULT_OUTPUT_TOKENS;
-  return { body: Buffer.from(JSON.stringify(payload)), budget: `injected(${DEFAULT_OUTPUT_TOKENS})` };
+  return { body: Buffer.from(JSON.stringify(payload)), budget: `injected(${DEFAULT_OUTPUT_TOKENS})`, stream };
 }
 
 function route(pathname) {
@@ -101,8 +102,8 @@ const server = http.createServer(async (req, res) => {
   // Only JSON bodies carry a token budget; leave form bodies and GETs alone.
   const type = String(req.headers["content-type"] || "").toLowerCase();
   const jsonish = type.includes("json") || (!type && body.length > 0);
-  const { body: sendBody, budget } =
-    req.method === "POST" && jsonish ? withBudget(body, route(req.url || "/")) : { body, budget: "none" };
+  const { body: sendBody, budget, stream } =
+    req.method === "POST" && jsonish ? withBudget(body, route(req.url || "/")) : { body, budget: "none", stream: null };
   const started = Date.now();
   try {
     const up = await fetch(target, {
@@ -120,7 +121,8 @@ const server = http.createServer(async (req, res) => {
     }
     res.end();
     console.log(
-      `${new Date().toISOString()} ${req.method} ${req.url} -> ${target} ${up.status} ${Date.now() - started}ms budget=${budget}`,
+      `${new Date().toISOString()} ${req.method} ${req.url} -> ${target} ${up.status} ${Date.now() - started}ms ` +
+        `budget=${budget} stream=${stream} sse=${/text\/event-stream/i.test(up.headers.get("content-type") || "")}`,
     );
   } catch (err) {
     res.writeHead(502, { "content-type": "application/json" });
